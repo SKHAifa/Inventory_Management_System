@@ -14,29 +14,61 @@ $requests = $conn->query("
     ORDER BY sr.created_at DESC
 ");
 
+$error = '';
+
 // ACCEPT REQUEST - Add to Products
 if (isset($_POST['accept'])) {
-    $item_name = $_POST['item_name'];
+    $item_name = trim($_POST['item_name'] ?? '');
     $quantity = (int)$_POST['quantity_needed'];
     $supplier_id = (int)$_POST['supplier_id']; // CHOOSE SUPPLIER!
-    
-    $stmt = $conn->prepare("INSERT INTO products (product_name, quantity, supplier_id, price) VALUES (?, ?, ?, 0.00)");
-    $stmt->bind_param("sii", $item_name, $quantity, $supplier_id);
-    $stmt->execute();
-    
-    $request_id = $_POST['request_id'];
-    $conn->query("UPDATE stock_requests SET status = 'approved' WHERE id = $request_id");
-    header("Location: staff_requests.php?success=1");
-    exit();
+    $request_id = (int)($_POST['request_id'] ?? 0);
+
+    if ($item_name === '' || $quantity < 1 || $supplier_id < 1 || $request_id < 1) {
+        $error = 'Please provide a valid item, quantity, supplier, and request.';
+    } else {
+        $conn->begin_transaction();
+        try {
+            $stmt = $conn->prepare("INSERT INTO products (product_name, quantity, supplier_id, price) VALUES (?, ?, ?, 0.00)");
+            $stmt->bind_param("sii", $item_name, $quantity, $supplier_id);
+            if (!$stmt->execute()) {
+                throw new Exception($stmt->error);
+            }
+
+            $stmt = $conn->prepare("UPDATE stock_requests SET status = 'approved' WHERE id = ? AND status = 'pending'");
+            $stmt->bind_param("i", $request_id);
+            if (!$stmt->execute() || $stmt->affected_rows !== 1) {
+                throw new Exception('The request is no longer pending or could not be updated.');
+            }
+
+            $conn->commit();
+            header("Location: staff_requests.php?success=1");
+            exit();
+        } catch (Exception $exception) {
+            $conn->rollback();
+            $error = 'Approval failed: ' . $exception->getMessage();
+        }
+    }
 }
 
 // DECLINE REQUEST
 if (isset($_POST['decline'])) {
-    $request_id = $_POST['request_id'];
-    $conn->query("UPDATE stock_requests SET status = 'rejected' WHERE id = $request_id");
-    header("Location: staff_requests.php?declined=1");
-    exit();
+    $request_id = (int)($_POST['request_id'] ?? 0);
+    $stmt = $conn->prepare("UPDATE stock_requests SET status = 'rejected' WHERE id = ? AND status = 'pending'");
+    $stmt->bind_param("i", $request_id);
+    if ($stmt->execute() && $stmt->affected_rows === 1) {
+        header("Location: staff_requests.php?declined=1");
+        exit();
+    }
+    $error = 'This request is no longer pending or could not be declined.';
 }
+
+$requests = $conn->query("
+    SELECT sr.*, u.name as staff_name
+    FROM stock_requests sr
+    JOIN users u ON sr.staff_id = u.id
+    ORDER BY sr.created_at DESC
+");
+$suppliers = $conn->query("SELECT id, supplier_name FROM suppliers ORDER BY supplier_name");
 ?>
 
 <!DOCTYPE html>
@@ -62,6 +94,10 @@ if (isset($_POST['decline'])) {
         
         <?php if(isset($_GET['declined'])): ?>
             <div class="alert alert-warning">❌ Request DECLINED successfully!</div>
+        <?php endif; ?>
+
+        <?php if($error): ?>
+            <div class="alert alert-danger"><?= htmlspecialchars($error) ?></div>
         <?php endif; ?>
         
         <?php if($requests->num_rows > 0): ?>
@@ -102,13 +138,11 @@ if (isset($_POST['decline'])) {
                                             <input type="hidden" name="request_id" value="<?= $row['id'] ?>">
                                             <input type="hidden" name="item_name" value="<?= htmlspecialchars($row['item_name']) ?>">
                                             <input type="hidden" name="quantity_needed" value="<?= $row['quantity_needed'] ?>">
-                                            <select name="supplier_id" class="form-select form-select-sm d-none">
-                                                <?php
-                                                $suppliers = $conn->query("SELECT id, supplier_name FROM suppliers");
-                                                while($s = $suppliers->fetch_assoc()) {
-                                                    echo "<option value='{$s['id']}'>{$s['supplier_name']}</option>";
-                                                }
-                                                ?>
+                                            <select name="supplier_id" class="form-select form-select-sm mb-2" required>
+                                                <option value="">Choose supplier</option>
+                                                <?php while($s = $suppliers->fetch_assoc()): ?>
+                                                    <option value="<?= (int)$s['id'] ?>"><?= htmlspecialchars($s['supplier_name']) ?></option>
+                                                <?php endwhile; ?>
                                             </select>
                                             <button type="submit" name="accept" class="btn btn-success btn-sm" 
                                                     onclick="return confirm('✅ APPROVE & Add <?= htmlspecialchars($row['item_name']) ?> to inventory?')">
